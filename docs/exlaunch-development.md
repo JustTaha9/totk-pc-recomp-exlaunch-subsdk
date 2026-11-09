@@ -36,7 +36,7 @@ In `$private/run/mods/SixMods`, put the matching merged `romfs` directory or a d
     --romfs "$game/romfs" --profile "$private/run/profile"
 ```
 
-For LLVM-MinGW, supply the `--toolchain`, `--deps` and `--ninja` paths described in [Building from source](building.md). The runtime must be compiled from this source tree for the prepared layout. Place the 0.3.13 shader translator and its `.id` file next to the executable. Keep the merged mod enabled and use the isolated `run/profile` directory for gameplay tests.
+For LLVM-MinGW, supply the `--toolchain`, `--deps` and `--ninja` paths described in [Building from source](building.md). The runtime must be compiled from this source tree for the prepared layout. When using the 0.3.13 installer toolchain, copy `SDL3.dll`, `libopus-0.dll`, `totk_xlate.exe` and `totk_xlate.id` from its `bin` directory next to the executable. Keep the merged mod enabled and use the isolated `run/profile` directory for gameplay tests.
 
 ```powershell
 $env:TOTK_HOOK_TRACE = '1'
