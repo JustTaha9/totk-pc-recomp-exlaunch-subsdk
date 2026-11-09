@@ -21,6 +21,8 @@ The commands below use PowerShell from the source checkout. Set `$python` and `$
 
 In `$private/run/mods/SixMods`, put the matching merged `romfs` directory or a directory junction to it. Copy the matching `.ips` files into `$private/run/mods/SixMods/exefs`. The prepared plugins load from the build's ExeFS path. The base extraction supplies the native runtime's `main.npdm`.
 
+If the merged RomFS includes `UI/LayoutArchive/Common.Product.110.Nin_NX_NVN.blarc.zs`, apply the quick-menu frame-rate fix to that archive. Use `tools/make_romfs_patches.py --version v121 --romfs "$game/romfs" --layout-archive <merged archive> --out "$private/layout-60fps"`. Copy just the generated archive to the same RomFS path inside a separate `00-native-layout-60fps` mod ordered above `SixMods`. The script validates the visibility tracks and handles the renamed shortcut capture pane in the selected pack.
+
 ```powershell
 & $python tools/exefs_patches.py --exefs "$game/exefs" --mods "$private/run/mods" `
     --patches recomp/patches-v121.txt --out "$private/ips-patches.txt" `

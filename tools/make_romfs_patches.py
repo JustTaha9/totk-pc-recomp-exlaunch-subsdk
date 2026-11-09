@@ -61,6 +61,7 @@ root = Path(__file__).resolve().parents[1]
 ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
 ap.add_argument('--version', choices=('v110', 'v121', 'v143'), default='v121')
 ap.add_argument('--romfs', type=Path, help='default build/extracted/<version>/romfs')
+ap.add_argument('--layout-archive', type=Path, help='apply the frame-rate fix to a modded Common layout archive')
 ap.add_argument('--out', type=Path,
                 help='default build/<version>/romfs-patches (romfs-patches-<style> with --prompts)')
 ap.add_argument('--aspect', help='<w>x<h> of a game resolution of another shape than 16:9: also lay the UI out for it')
@@ -71,6 +72,8 @@ ap.add_argument('--prompts', choices=('xbox', 'xbox-label', 'pc'),
 ap.add_argument('--binds', type=Path, help='--prompts pc: a totk.ini whose bind_ lines the key icons follow')
 ap.add_argument('--xbox-prompts', dest='prompts', action='store_const', const='xbox', help='the same as --prompts xbox')
 args = ap.parse_args()
+if args.layout_archive and (not args.out or args.prompts or args.aspect):
+    ap.error('--layout-archive requires an explicit --out and the plain frame-rate overlay')
 args.romfs = args.romfs or root / 'build/extracted' / args.version / 'romfs'
 args.out = args.out or root / 'build' / args.version / (f'romfs-patches-{args.prompts}' if args.prompts else 'romfs-patches')
 index = json.loads((args.romfs / 'index.json').read_text())
@@ -350,13 +353,19 @@ with (args.romfs / 'romfs.bin').open('rb') as image:
         dictionaries[d.dict_id] = d
     prompt_files = (FONTS + (MALS if letter_panes else []) + [RESTBL]) if args.prompts else []
     originals = {path: read(path) for path in [ARCHIVE] + prompt_files}
+if args.layout_archive:
+    originals[ARCHIVE] = args.layout_archive.read_bytes()
 raw = originals[ARCHIVE]
 info = zstd.get_frame_info(raw)
-dictionary = dictionaries[info.dictionary_id]
+dictionary = dictionaries[info.dictionary_id] if info.dictionary_id else None
 original = zstd.decompress(raw, zstd_dict=dictionary)
 blarc = bytearray(original)
 assert len(blarc) == info.decompressed_size
 members = sarc_members(blarc)
+if args.layout_archive:
+    shortcut_panes, _, _ = bflyt_panes(blarc, *members['blyt/ShortCutBG_00.bflyt'])
+    if 'C_CaptureBG_00' not in shortcut_panes and 'C_Capture_00' in shortcut_panes:
+        MEMBERS['anim/ShortCutBG_00_In.bflan'] = ('C_Capture_00', 'C_CaptureClearBG_00', 'P_CaptureClearBG_00')
 patched = {}
 for member, panes in MEMBERS.items():
     lo, hi = members[member]
