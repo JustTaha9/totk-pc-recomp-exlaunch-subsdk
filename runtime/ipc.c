@@ -697,7 +697,8 @@ static uint64_t stub(const char *sym) {
 static void sdk_prepare(Cpu *c) {
     Cpu *again;
     ST32(LD64(c->tpidrro + 0x1F8) + 0x1B0, kern_main_thread(&again));
-    const RtLoaded *sdk = ldr_module(2);
+    const RtLoaded *sdk = ldr_named("sdk");
+    if (!sdk) rt_fatal("probe-ipc: sdk is not loaded");
     static const uint64_t ctors_121[] = {0x1dcbd0, 0x1de8a0}, ctors_143[] = {0x221fb0};
     const uint64_t *heap_ctors = RT_V143 ? ctors_143 : ctors_121;
     unsigned nctors = RT_V143 ? sizeof ctors_143 / sizeof *ctors_143 : sizeof ctors_121 / sizeof *ctors_121;

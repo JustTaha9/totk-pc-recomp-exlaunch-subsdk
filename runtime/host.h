@@ -175,10 +175,12 @@ int mem_guest_readable(uint64_t a, uint64_t n);            // [a, a+n) can be re
 typedef struct {
     const char *name; uint64_t base, size, text_end, data_off;   // text_end, data_off: offsets from base
     uint64_t init, init_array, init_array_size, ctor_flag;  // absolute guest addresses; init_array_size in bytes
+    bool preinitialized;
 } RtLoaded;
 void ldr_load(const char *exefs_dir);                      // load, relocate (overrides applied), seal; once
 int ldr_count(void);
-const RtLoaded *ldr_module(int i);                         // order: main, subsdk0, sdk
+const RtLoaded *ldr_module(int i);                         // guest layout order
+const RtLoaded *ldr_named(const char *name);
 uint64_t ldr_symbol(const char *name);                     // exported definition, 0 if none
 uint64_t ldr_plt_stub(const char *module, const char *name); // PLT stub whose GOT slot holds name, 0 if none
 const char *ldr_describe(uint64_t a, char *buf, int n);    // "main+0x1234 (symbol+0x10)", "host <name>", or the address
@@ -189,6 +191,9 @@ uint8_t *ldr_read_verified(const char *dir, const char *file, size_t *len);   //
 typedef struct { const char *file, *sha256; } RtFileHash;
 extern const RtFileHash rt_exefs_sha256[];                 // tools/data/expected-<version>.json "exefs_sha256"
 extern const int rt_exefs_sha256_count;
+typedef struct { const char *module; uint32_t offset, info_type; bool end; } RtPluginMemoryInfo;
+extern const RtPluginMemoryInfo rt_plugin_memory_info[];
+extern const int rt_plugin_memory_info_count;
 extern const char rt_default_exefs[], rt_default_romfs[], rt_default_profile[];
 extern const int rt_game_version;                          // the game build: 110 (1.1.0), 121 (1.2.1) or 143 (1.4.3)
 extern const char rt_port_version[];                       // VERSION at the build's root: 0.1.0, 0.1.0+973c626 in a release

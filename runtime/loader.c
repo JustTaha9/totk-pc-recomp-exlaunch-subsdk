@@ -59,6 +59,11 @@ static PlatMutex plt_lock = PLAT_MUTEX_INIT;
 
 int ldr_count(void) { return nmods; }
 const RtLoaded *ldr_module(int i) { return i >= 0 && i < nmods ? &mods[i].pub : NULL; }
+const RtLoaded *ldr_named(const char *name) {
+    for (int i = 0; i < nmods; i++)
+        if (!strcmp(mods[i].pub.name, name)) return &mods[i].pub;
+    return NULL;
+}
 
 static uint32_t rd32(uint64_t a) { return LD32(a); }
 
@@ -174,9 +179,10 @@ static uint64_t module_symbol(const Mod *m, const char *name) {
     return 0;
 }
 
-// The defined symbol in load order (main, subsdk0, sdk); *which is its module index.
+// Vanilla global exports in load order. Preinitialized plugins have private exports and bind to the game.
 static uint64_t find_symbol(const char *name, int *which) {
     for (int i = 0; i < nmods; i++) {
+        if (mods[i].pub.preinitialized) continue;
         uint64_t a = module_symbol(&mods[i], name);
         if (a) {
             if (which) *which = i;
@@ -293,6 +299,7 @@ static void load_module(Mod *m, const char *dir, const RtLayoutEntry *lay) {
     m->pub.name = lay->name;
     m->pub.base = lay->base;
     m->pub.size = size;
+    m->pub.preinitialized = lay->preinitialized;
     m->pub.text_end = seg[0].mem_off + seg[0].size;
     m->pub.data_off = seg[2].mem_off;
     if (m->pub.data_off & 0xFFF) rt_fatal("loader: %s data segment is not page aligned", lay->name);
@@ -441,6 +448,19 @@ static void seal(Mod *m) {
         rt_fatal("loader: cannot seal %s", m->pub.name);
 }
 
+static void plugin_memory_info(const Mod *m) {
+    for (int i = 0; i < rt_plugin_memory_info_count; i++) {
+        const RtPluginMemoryInfo *info = &rt_plugin_memory_info[i];
+        if (strcmp(info->module, m->pub.name)) continue;
+        uint64_t base, size;
+        if (info->offset < m->pub.data_off || info->offset > m->pub.size - 16 || (info->offset & 7)
+            || !mem_info(info->info_type, &base) || !mem_info(info->info_type + 1, &size))
+            rt_fatal("loader: invalid memory info fixup for %s+%#x", m->pub.name, info->offset);
+        ST64(m->pub.base + info->offset, base);
+        ST64(m->pub.base + info->offset + 8, info->end ? base + size : size);
+    }
+}
+
 void ldr_load(const char *exefs_dir) {
     if (nmods) rt_fatal("ldr_load called twice");
     if (!mem_layout()->pool) rt_fatal("ldr_load before mem_init");
@@ -454,7 +474,8 @@ void ldr_load(const char *exefs_dir) {
         relocate_table(&mods[i], mods[i].jmprel, mods[i].njmprel);
         relocate_relr(&mods[i]);
         count_imports(&mods[i]);
-        mods[i].pub.ctor_flag = decode_ctor_flag(&mods[i]);
+        if (mods[i].pub.preinitialized) plugin_memory_info(&mods[i]);
+        else mods[i].pub.ctor_flag = decode_ctor_flag(&mods[i]);
     }
     verify_identity();
     for (int i = 0; i < nmods; i++) seal(&mods[i]);
@@ -665,7 +686,7 @@ int probe_loader(void) {
     hostfn_add_override(PROBE_SYMBOL, probe_override);
     ldr_load(cfg->exefs);
     if (nmods != (int)(sizeof expect_121 / sizeof *expect_121)) {
-        printf("probe-loader: FAILED (%d modules, expected 3)\n", nmods);
+        printf("probe-loader: vanilla layout required (%d modules loaded)\n", nmods);
         return 1;
     }
     printf("modules (exefs %s):\n", cfg->exefs);

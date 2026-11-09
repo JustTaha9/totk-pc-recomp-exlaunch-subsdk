@@ -350,7 +350,7 @@ def runtime_object(out, src):
     return out / 'obj' / 'runtime' / rel.with_suffix('.o')
 
 
-def module_glue(layout, linked, hashes, paths, version):
+def module_glue(layout, linked, hashes, paths, version, preinitialized=(), plugin_memory_info=()):
     """C for build/<version>/modules.c: the layout table, the linked modules' function tables (dispatch.h), the
     expected ExeFS hashes, the game version and the default game paths (host.h)."""
     out = [f'// Module glue written by tools/build_game.py; do not edit. {GENERATED_MARKER}',
@@ -360,7 +360,8 @@ def module_glue(layout, linked, hashes, paths, version):
         out.append(f'_Static_assert(MOD_{u}_BASE == {base:#x}ull && MOD_{u}_SIZE == {size:#x}ull, '
                    f'"layout.h and layout.json disagree on {name}");')
     out += ['', 'const RtLayoutEntry rt_layout[] = {']
-    out += [f'    {{"{n}", MOD_{n.upper()}_BASE, MOD_{n.upper()}_SIZE}},' for n, _, _ in layout]
+    out += [f'    {{"{n}", MOD_{n.upper()}_BASE, MOD_{n.upper()}_SIZE, {str(n in preinitialized).lower()}}},'
+            for n, _, _ in layout]
     out += ['};', f'const int rt_layout_count = {len(layout)};', '']
     for name in linked:
         out += [f'extern const uint64_t {name}_fn_addrs[];', f'extern const GuestFn {name}_fn_ptrs[];',
@@ -374,6 +375,10 @@ def module_glue(layout, linked, hashes, paths, version):
     out += ['const RtFileHash rt_exefs_sha256[] = {']
     out += [f'    {{{c_string(f)}, {c_string(h)}}},' for f, h in sorted(hashes.items())]
     out += ['};', f'const int rt_exefs_sha256_count = {len(hashes)};', '']
+    out += ['const RtPluginMemoryInfo rt_plugin_memory_info[] = {']
+    out += [f'    {{{c_string(n)}, {off:#x}u, {kind}u, {str(extent == "end").lower()}}},'
+            for n, off, kind, extent in plugin_memory_info] or ['    {0},']
+    out += ['};', f'const int rt_plugin_memory_info_count = {len(plugin_memory_info)};', '']
     for name in ('exefs', 'romfs', 'profile'):
         out.append(f'const char rt_default_{name}[] = {c_string(paths[name].as_posix())};')
     number = int(DISPLAY_VERSIONS[version].replace('.', '')) if version in DISPLAY_VERSIONS else 0   # 1.4.3 -> 143
@@ -856,7 +861,8 @@ def main():
         if args.version not in DISPLAY_VERSIONS:
             sys.exit(f'no expected hashes known for {args.version}; pass --expected')
         expected = ROOT / 'tools' / 'data' / f'expected-v{DISPLAY_VERSIONS[args.version]}.json'
-    hashes = json.loads(Path(expected).read_text())['exefs_sha256']
+    manifest = json.loads(Path(expected).read_text())
+    hashes = manifest['exefs_sha256']
     global CLANG, AR, WINDRES, NINJA, TOOLCHAIN_BIN, DEPS
     if args.ninja:
         NINJA = args.ninja.resolve()
@@ -892,11 +898,29 @@ def main():
 
     layout = read_layout(gen)
     names = [n for n, _, _ in layout]
+    plugins = set(names) - {'main', 'subsdk0', 'sdk'}
+    preinitialized = manifest.get('preinitialized_plugins', [])
+    if (not isinstance(preinitialized, list) or any(not isinstance(n, str) for n in preinitialized)
+            or sorted(preinitialized) != sorted(plugins)):
+        sys.exit('build_game: the expected manifest must identify every staged plugin as preinitialized')
+    if plugins and (manifest.get('display_version') != DISPLAY_VERSIONS.get(args.version) or args.runtime_lib):
+        sys.exit('build_game: a staged plugin build requires its matching game version and a source runtime build')
+    plugin_memory_info = manifest.get('plugin_memory_info', [])
+    sizes = {n: s for n, _, s in layout}
+    if not isinstance(plugin_memory_info, list):
+        sys.exit('build_game: invalid staged plugin memory info fixups')
+    for row in plugin_memory_info:
+        if (not isinstance(row, list) or len(row) != 4 or row[0] not in preinitialized
+                or type(row[1]) is not int or not 0 <= row[1] <= sizes[row[0]] - 16 or row[1] % 8
+                or row[2] not in (2, 4, 12, 14) or row[3] not in ('size', 'end')):
+            sys.exit('build_game: invalid staged plugin memory info fixup')
     wanted = args.modules.split(',') if args.modules else names
     unknown = [m for m in wanted if m not in names]
     if unknown:
         sys.exit(f'unknown modules {unknown}; the layout has {names}')
     linked = [m for m in names if m in wanted]
+    if plugins - set(linked):
+        sys.exit('build_game: every preinitialized plugin must be linked')
     # --make-runtime-lib builds runtime/ only, so it never reads the generated chunks
     mods = {} if args.make_runtime_lib else {m: chunk_files(gen, m) for m in linked}
 
@@ -906,7 +930,8 @@ def main():
     missing = [n for n in names if n not in hashes]
     if missing:
         sys.exit(f'{expected}: no exefs_sha256 for {missing}')
-    write_if_changed(out / 'modules.c', module_glue(layout, linked, hashes, paths, args.version))
+    write_if_changed(out / 'modules.c', module_glue(layout, linked, hashes, paths, args.version,
+                                                    preinitialized, plugin_memory_info))
     if has_romfs:
         count, size, dt = romfs_index.write(paths['romfs'], out)
         print(f'romfs index: {count} files, {mib(size)}, {dt:.1f} s')

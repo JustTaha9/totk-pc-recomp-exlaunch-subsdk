@@ -43,8 +43,8 @@ static volatile int32_t inits_done, checkpoint_seen;
 uint64_t rt_guest_start_ns;
 
 static const RtLoaded *module_named(const char *name) {
-    for (int i = 0; i < ldr_count(); i++)
-        if (!strcmp(ldr_module(i)->name, name)) return ldr_module(i);
+    const RtLoaded *m = ldr_named(name);
+    if (m) return m;
     rt_fatal("boot: module %s is not loaded", name);
 }
 
@@ -115,10 +115,11 @@ void rt_boot_event(const char *what, Cpu *c, const char *detail) {
             rt_fatal("boot: checkpoint %s reached from %s, expected main+%#llx", detail, at,
                      (unsigned long long)CHECKPOINT_RET);
         if (!plat_cas32(&inits_done, 0, 0)) rt_fatal("boot: checkpoint %s before DT_INIT", detail);
-        for (int i = 0; i < ldr_count(); i++)
-            if (ctor_state(ldr_module(i)) != CTOR_DONE)
-                rt_fatal("boot: checkpoint %s: %s constructor flag reads %u", detail, ldr_module(i)->name,
-                         ctor_state(ldr_module(i)));
+        for (int i = 0; i < ldr_count(); i++) {
+            const RtLoaded *m = ldr_module(i);
+            if (!m->preinitialized && ctor_state(m) != CTOR_DONE)
+                rt_fatal("boot: checkpoint %s: %s constructor flag reads %u", detail, m->name, ctor_state(m));
+        }
         plat_xchg32(&checkpoint_seen, 1);
         rt_logf("boot: checkpoint %s from main+%#llx\n", detail, (unsigned long long)(ret - main_mod->base));
         return;
@@ -346,6 +347,11 @@ void rt_boot(void) {
     ldr_load(rt_config()->exefs);
     rt_patches_init();
     mods_exefs_switch();   // after the patch sets' settings: an enabled mod's ExeFS patches on
+    for (int i = 0; i < ldr_count(); i++) {
+        const RtLoaded *m = ldr_module(i);
+        if (m->preinitialized && !rt_patch_enabled(rt_patch_set("exlaunch")))
+            rt_fatal("boot: %s needs the generated Exlaunch hook set", m->name);
+    }
     frame_step_init();
     res_init();
     cheats_init();   // after the patch sets: a cheat's set follows its setting

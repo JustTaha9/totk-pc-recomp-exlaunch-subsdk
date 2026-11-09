@@ -5,9 +5,9 @@ generator and the runtime must agree on every module base. This is the single pl
 calls layout() and writes the result into generated/<version>/layout.h and layout.json, which the runtime and the
 build read.
 
-Modules are placed in Horizon's load order (rtld is dropped; the host links the modules):
-main, subsdk0..9, sdk. Each base is aligned to 2 MiB. Everything must stay below 2^39, the limit of the addresses
-IPC buffers can encode.
+The host links the vanilla modules main, subsdk0 and sdk. Optional staged plugins follow the SDK so the vanilla
+addresses stay fixed. Each base is aligned to 2 MiB. Everything must stay below 2^39, the limit of the addresses IPC
+buffers can encode.
 """
 import json
 from pathlib import Path
@@ -17,19 +17,20 @@ from nso import Nso
 FIRST_BASE = 0x7000000000
 ALIGN = 0x200000
 ADDRESS_LIMIT = 1 << 39
-ORDER = ['main'] + [f'subsdk{i}' for i in range(10)] + ['sdk']
+ORDER = ['main', 'subsdk0', 'sdk'] + [f'subsdk{i}' for i in range(1, 10)]
 
 
 def align_up(v, a=ALIGN):
     return (v + a - 1) & ~(a - 1)
 
 
-def layout(exefs):
-    """[(name, base, size)] for the modules present in the ExeFS directory, in load order."""
+def layout(exefs, plugins=None):
+    """[(name, base, size)] for the modules present in the ExeFS directory, in runtime layout order."""
     exefs = Path(exefs)
+    plugins = plugins or {}
     out, base = [], FIRST_BASE
     for name in ORDER:
-        path = exefs / name
+        path = Path(plugins.get(name, exefs / name))
         if not path.exists():
             continue
         size = Nso(str(path)).size

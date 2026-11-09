@@ -83,7 +83,7 @@ class Module:
     def eh_frame_functions(self):
         """Function starts from .eh_frame_hdr's binary search table (absolute addresses)."""
         img, hdr = self.image, self.nso.eh_start
-        if not hdr or hdr >= len(img):
+        if not hdr or hdr == self.nso.eh_end or hdr >= len(img):
             return []
         _, ptr_enc, cnt_enc, tbl_enc = img[hdr:hdr + 4]
         off = hdr + 4
