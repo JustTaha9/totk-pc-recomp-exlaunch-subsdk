@@ -48,3 +48,5 @@ $env:TOTK_HOOK_TRACE = '1'
 ```
 
 The trace logs the first execution of each captured hook or replacement. The capture rejects unsupported initializer calls, overlapping code writes and unexplained differences across trials. Prepared images can only replay the captured startup state and supported hook forms. Validate gameplay and save/load with the specific merged resources and versions before reusing an existing save.
+
+The 1.2.1 runtime supplies an empty guest pointer cell for the older Exlaunch wrappers' missing manual lookup callback import. The primary lookup still runs first. After a miss, the wrapper checks the empty cell and reports that it found no symbol. This binding applies only to the known zero-addend data relocation in a prepared 1.2.1 module.

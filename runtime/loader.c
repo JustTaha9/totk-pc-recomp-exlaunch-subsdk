@@ -22,13 +22,13 @@ enum { DT_NULL = 0, DT_PLTRELSZ = 2, DT_HASH = 4, DT_STRTAB = 5, DT_SYMTAB = 6, 
        DT_FINI_ARRAYSZ = 28, DT_RELRSZ = 0x23, DT_RELR = 0x24, DT_GNU_HASH = 0x6ffffef5 };
 enum { R_ABS64 = 257, R_GLOB_DAT = 1025, R_JUMP_SLOT = 1026, R_RELATIVE = 1027 };
 enum { K_RELATIVE, K_ABS64, K_GLOB_DAT, K_JUMP_SLOT, K_COUNT };
-enum { STB_WEAK = 2, STT_FUNC = 2 };
+enum { STB_GLOBAL = 1, STB_WEAK = 2, STT_NOTYPE = 0, STT_FUNC = 2 };
 
 typedef struct { uint32_t name; uint8_t info, other; uint16_t shndx; uint64_t value, size; } Elf64Sym;
 typedef struct { uint64_t off, info; int64_t addend; } Elf64Rela;
 
 // How a symbol of a relocation was bound.
-enum { RES_UNSET, RES_GUEST, RES_OVERRIDE, RES_OBSERVER, RES_WEAK, RES_STUB };
+enum { RES_UNSET, RES_GUEST, RES_OVERRIDE, RES_OBSERVER, RES_WEAK, RES_STUB, RES_PLUGIN_DATA };
 typedef struct { uint64_t value; uint8_t kind; } Res;
 
 typedef struct {
@@ -327,9 +327,14 @@ static void mark_used(int observers, const char *name) {
 
 // Order (MNG loader.c:216-224): observer (JUMP_SLOT only), override by name, own definition, other modules in load
 // order, weak -> 0, strong -> named fatal stub. Overrides also replace a module's own symbols.
-static Res resolve(Mod *m, uint32_t si, int jump) {
+static Res resolve(Mod *m, uint32_t si, uint32_t type, int64_t addend) {
+    int jump = type == R_JUMP_SLOT;
     Res *cache = jump ? &m->res_jump[si] : &m->res_plain[si];
-    if (cache->kind != RES_UNSET) return *cache;
+    if (cache->kind != RES_UNSET) {
+        if (cache->kind == RES_PLUGIN_DATA && (type != R_GLOB_DAT || addend))
+            rt_fatal("loader: %s has an unexpected manual lookup relocation", m->pub.name);
+        return *cache;
+    }
     const char *name = sym_name(m, si);
     uint64_t guest = sym_defined(m, si) ? m->pub.base + m->syms[si].value : find_symbol(name, NULL);
     GuestFn f;
@@ -344,6 +349,17 @@ static Res resolve(Mod *m, uint32_t si, int jump) {
         r = (Res){guest, RES_GUEST};
     } else if ((m->syms[si].info >> 4) == STB_WEAK) {
         r = (Res){0, RES_WEAK};
+    } else if (rt_game_version == 121 && m->pub.preinitialized &&
+               !strcmp(name, "_ZN2nn2ro6detail35g_LookupGlobalManualFunctionPointerE")) {
+        // Older Exlaunch wrappers read this pointer cell after their primary lookup misses. The 1.2.1 SDK
+        // does not export the cell. Its similarly named g_pLookupGlobalManualFunctionPointer is a pointer
+        // to a cell, so the wrapper cannot use that symbol as a callback. A null callback preserves the miss.
+        if (type != R_GLOB_DAT || addend || m->syms[si].info != (STB_GLOBAL << 4 | STT_NOTYPE))
+            rt_fatal("loader: %s has an unexpected manual lookup import", m->pub.name);
+        static void *empty_lookup;
+        if (!empty_lookup) empty_lookup = mem_kernel_alloc(sizeof(uint64_t), sizeof(uint64_t));
+        r = (Res){(uint64_t)(uintptr_t)empty_lookup, RES_PLUGIN_DATA};
+        rt_log("%s: SDK manual lookup callback unavailable; using an empty cell", m->pub.name);
     } else {
         r = (Res){hostfn_register(name, unresolved_stub), RES_STUB};
         stubs++;
@@ -372,7 +388,7 @@ static void relocate_table(Mod *m, const Elf64Rela *r, uint64_t n) {
             m->kinds[k]++;
             if (sym_defined(m, si)) m->sym_own++;
             else m->sym_import++;
-            Res s = resolve(m, si, type == R_JUMP_SLOT);
+            Res s = resolve(m, si, type, r[i].addend);
             v = s.kind == RES_WEAK ? 0 : s.value + (type == R_JUMP_SLOT ? 0 : (uint64_t)r[i].addend);
         }
         ST64(base + r[i].off, v);
@@ -414,7 +430,7 @@ static void count_imports(Mod *m) {
         int which = -1;
         if (find_symbol(sym_name(m, i), &which)) m->import_to[which]++;
         else if ((m->syms[i].info >> 4) == STB_WEAK) m->weak_unresolved++;
-        else m->strong_unresolved++;
+        else if (m->res_plain[i].kind != RES_PLUGIN_DATA) m->strong_unresolved++;
     }
 }
 
