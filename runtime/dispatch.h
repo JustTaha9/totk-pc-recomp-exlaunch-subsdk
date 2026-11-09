@@ -20,7 +20,7 @@ typedef struct RtModule {
 
 // The module glue that tools/build_game.py writes for each build (build/<version>/modules.c), from layout.json and
 // layout.h: every module of the layout, and the modules linked into this executable.
-typedef struct RtLayoutEntry { const char *name; uint64_t base, size; bool preinitialized; } RtLayoutEntry;
+typedef struct RtLayoutEntry { const char *name; uint64_t base, size; } RtLayoutEntry;
 extern const RtLayoutEntry rt_layout[];
 extern const int rt_layout_count;
 int rt_linked_modules(RtModule *out, int max);

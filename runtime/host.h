@@ -192,6 +192,7 @@ typedef struct { const char *file, *sha256; } RtFileHash;
 extern const RtFileHash rt_exefs_sha256[];                 // tools/data/expected-<version>.json "exefs_sha256"
 extern const int rt_exefs_sha256_count;
 typedef struct { const char *module; uint32_t offset, info_type; bool end; } RtPluginMemoryInfo;
+extern const bool rt_preinitialized_modules[];            // indexed like rt_layout
 extern const RtPluginMemoryInfo rt_plugin_memory_info[];
 extern const int rt_plugin_memory_info_count;
 extern const char rt_default_exefs[], rt_default_romfs[], rt_default_profile[];

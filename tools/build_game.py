@@ -360,9 +360,10 @@ def module_glue(layout, linked, hashes, paths, version, preinitialized=(), plugi
         out.append(f'_Static_assert(MOD_{u}_BASE == {base:#x}ull && MOD_{u}_SIZE == {size:#x}ull, '
                    f'"layout.h and layout.json disagree on {name}");')
     out += ['', 'const RtLayoutEntry rt_layout[] = {']
-    out += [f'    {{"{n}", MOD_{n.upper()}_BASE, MOD_{n.upper()}_SIZE, {str(n in preinitialized).lower()}}},'
-            for n, _, _ in layout]
+    out += [f'    {{"{n}", MOD_{n.upper()}_BASE, MOD_{n.upper()}_SIZE}},' for n, _, _ in layout]
     out += ['};', f'const int rt_layout_count = {len(layout)};', '']
+    init_flags = ', '.join(str(n in preinitialized).lower() for n, _, _ in layout)
+    out += [f'const bool rt_preinitialized_modules[] = {{{init_flags}}};', '']
     for name in linked:
         out += [f'extern const uint64_t {name}_fn_addrs[];', f'extern const GuestFn {name}_fn_ptrs[];',
                 f'extern const uint64_t {name}_fn_count;']

@@ -299,7 +299,6 @@ static void load_module(Mod *m, const char *dir, const RtLayoutEntry *lay) {
     m->pub.name = lay->name;
     m->pub.base = lay->base;
     m->pub.size = size;
-    m->pub.preinitialized = lay->preinitialized;
     m->pub.text_end = seg[0].mem_off + seg[0].size;
     m->pub.data_off = seg[2].mem_off;
     if (m->pub.data_off & 0xFFF) rt_fatal("loader: %s data segment is not page aligned", lay->name);
@@ -465,7 +464,10 @@ void ldr_load(const char *exefs_dir) {
     if (nmods) rt_fatal("ldr_load called twice");
     if (!mem_layout()->pool) rt_fatal("ldr_load before mem_init");
     if (rt_layout_count > MOD_COUNT) rt_fatal("loader: %d modules in the layout", rt_layout_count);
-    for (int i = 0; i < rt_layout_count; i++) load_module(&mods[i], exefs_dir, &rt_layout[i]);
+    for (int i = 0; i < rt_layout_count; i++) {
+        load_module(&mods[i], exefs_dir, &rt_layout[i]);
+        mods[i].pub.preinitialized = rt_preinitialized_modules[i];
+    }
     nmods = rt_layout_count;
     ovr_used = calloc(hostfn_table_size(0) + 1, sizeof(int));
     obs_used = calloc(hostfn_table_size(1) + 1, sizeof(int));
