@@ -582,7 +582,12 @@ int vk_selftest(void) {
 int probe_vkdevice(void) {
     int rc = vk_selftest();
     VkCtx *c = vk_ctx();
-    if (rc || !c) { printf("probe-vkdevice: FAILED (selftest %d)\n", rc ? rc : 1); vk_shutdown(); return 1; }
+    if (rc || !c) {
+        printf("probe-vkdevice: FAILED (selftest %d)\n", rc ? rc : 1);
+        vk_mem_shutdown();
+        vk_shutdown();
+        return 1;
+    }
     uint32_t v = c->props.apiVersion;
     printf("probe-vkdevice: device %d \"%s\" api %u.%u.%u, gfx queue family %u, transfer family %u%s, host import alignment %#x\n",
            c->device_index, c->props.deviceName, VK_API_VERSION_MAJOR(v), VK_API_VERSION_MINOR(v), VK_API_VERSION_PATCH(v),
@@ -593,6 +598,7 @@ int probe_vkdevice(void) {
            c->has_conditional_rendering, c->has_transform_feedback, c->has_provoking_vertex, c->has_robustness2,
            c->has_device_fault, c->has_memory_budget, c->has_buffer_device_address, c->has_fragment_shader_interlock,
            c->has_buffer_marker, c->has_nv_checkpoints, c->validation);
+    vk_mem_shutdown();
     vk_shutdown();
     printf("probe-vkdevice: %s (validation errors %ld)\n", g_errors_total ? "FAILED" : "passed", g_errors_total);
     return g_errors_total ? 1 : 0;
