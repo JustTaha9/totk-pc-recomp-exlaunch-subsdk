@@ -26,6 +26,13 @@
 #endif
 
 uint8_t rt_patch_on[RT_PATCH_COUNT > 0 ? RT_PATCH_COUNT : 1];   // read by the generated C at every patched site
+uint8_t rt_hook_trace_enabled;   // read by lifted hook sites after boot
+
+void rt_hook_trace_log(uint64_t site, uint64_t target, const char *kind) {
+    char from[96], to[96];
+    rt_log("plugins: first %s hook hit at %s -> %s", kind, rt_guest_name(site, from, sizeof from),
+           rt_guest_name(target, to, sizeof to));
+}
 
 #if RT_PATCH_COUNT
 static const struct { const char *name, *env; int on; } sets[] = {
@@ -38,6 +45,8 @@ static void *page;
 
 void rt_patches_init(void) {
 #if RT_PATCH_COUNT
+    const char *trace = cfg_get("TOTK_HOOK_TRACE");
+    rt_hook_trace_enabled = trace && !strcmp(trace, "1");
     if (!plat_mem_commit(RT_PATCH_PAGE, 0x1000))
         rt_fatal("patches: cannot commit the patch page at %#llx", RT_PATCH_PAGE);
     page = (void *)(uintptr_t)RT_PATCH_PAGE;

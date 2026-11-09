@@ -7,6 +7,7 @@ Lifted code cannot be byte-patched when the game runs, so a patch is applied whe
   site <set> <module> <address> <original> <replacement> [<replacement> ...]
 
   spin <module> <head> <back-edge> [<back-edge> ...]
+  seed <module> <offset>
 
 <address> is a module offset (hex), <original> the instruction word the module has there (checked; a mismatch stops
 the generator), each <replacement> an instruction word (hex) or `@page:x<n>`, which is `adrp x<n>, <patch page>`
@@ -25,11 +26,19 @@ a bl (lifted with the site's return address), a b or b.cond / cbz / tbz (its tar
 inside it) or a ret; earlier words must not branch. Every alternative of a site writes the same flags. The generator
 writes patches.h (set names, switches, the page address) next to layout.h for the runtime.
 
+A site's sole replacement may be `@hook:<absolute guest address in hex>`. The target is a lifted inline wrapper
+in a different module that returns to the lifted site. The wrapper sees the site's registers and guest LR, and its
+register changes are visible to the original instruction, which always runs at the site's own address. The wrapper
+is responsible for restoring LR, and the emitter preserves NZCV. `@replace:<absolute guest address in hex>` instead
+tail-branches to a lifted replacement function at a discovered function entry. A hook site cannot share a patch or
+spin back-edge. A `seed` adds an indirect target, such as an inline wrapper's callback, to function discovery.
+
 A `spin` line names a spin wait found by tools/spin_waits.py: a loop with head <head> that only another thread can end,
 and the direct branches back to it (module offsets). Each back-edge (checked: a b, b.cond, cbz / cbnz or tbz / tbnz to
 <head>) is lifted as `rt_spin_gate(c, <head>); goto <head>`, which keeps every register and only adds time
 (runtime/kernel.c kern_spin_gate).
 """
+from dataclasses import dataclass
 from pathlib import Path
 
 PAGE = 0x1000
@@ -37,6 +46,13 @@ PAGE = 0x1000
 
 class PatchError(ValueError):
     pass
+
+
+@dataclass(frozen=True)
+class Hook:
+    """Guest entry of a lifted inline wrapper or a replacement function."""
+    target: int
+    replace: bool
 
 
 def adrp(pc, target, rd):
@@ -48,21 +64,22 @@ def adrp(pc, target, rd):
 
 
 class Table:
-    """sets: [(name, env, default)]; sites: {module: {offset: [(set index, [word | ('page', reg)], original)]}} (the
+    """sets: [(name, env, default)]; sites: {module: {offset: [(set index, [word | ('page', reg) | Hook], original)]}} (the
     alternatives of a site in file order); page."""
 
-    def __init__(self, sets=(), sites=None, page=0, spins=None):
+    def __init__(self, sets=(), sites=None, page=0, spins=None, seeds=None):
         self.sets = list(sets)
         self.sites = sites or {}
         self.page = page
         self.spins = spins or {}   # {module: {back-edge offset: head offset}}
+        self.seeds = seeds or {}   # {module: {function offsets}}
 
     def spins_for(self, name, base):
         """{absolute back-edge address: absolute head address}."""
         return {base + b: base + h for b, h in self.spins.get(name, {}).items()}
 
     def for_module(self, name, base):
-        """{absolute address: [(set index, [words])]} with @page resolved."""
+        """{absolute address: [(set index, [words or Hook])]} with @page resolved."""
         out = {}
         for off, alts in self.sites.get(name, {}).items():
             a = base + off
@@ -70,10 +87,18 @@ class Table:
                       for k, repl, _ in alts]
         return out
 
+    def hooks(self):
+        """(source module, source offset, hook) for every hook site."""
+        for name, sites in self.sites.items():
+            for off, alts in sites.items():
+                word = alts[0][1][0]
+                if isinstance(word, Hook):
+                    yield name, off, word
+
 
 def load(path, mods):
     """Table from a patch file; mods is layout() output [(name, base, size)]."""
-    sets, index, sites, spins = [], {}, {}, {}
+    sets, index, sites, spins, seeds = [], {}, {}, {}, {}
     bases = {n: (b, s) for n, b, s in mods}
     for no, raw in enumerate(Path(path).read_text().splitlines(), 1):
         f = raw.split('#', 1)[0].split()
@@ -95,14 +120,32 @@ def load(path, mods):
             for w in f[5:]:
                 if w.startswith('@page:x'):
                     repl.append(('page', int(w[7:])))
+                elif w.startswith(('@hook:', '@replace:')):
+                    kind, raw_target = w.split(':', 1)
+                    try:
+                        target = int(raw_target, 16)
+                    except ValueError as e:
+                        raise PatchError(f'{where}: invalid hook target {raw_target!r}') from e
+                    if len(f) != 6 or target & 3 or not any(
+                        n != f[2] and b <= target < b + s for n, (b, s) in bases.items()
+                    ):
+                        raise PatchError(f'{where}: hook must be a single aligned target in another module')
+                    repl.append(Hook(target, kind == '@replace'))
                 else:
                     repl.append(int(w, 16))
             alts = sites.setdefault(f[2], {}).setdefault(off, [])
+            if alts and (isinstance(repl[0], Hook) or isinstance(alts[0][1][0], Hook)):
+                raise PatchError(f'{where}: hook shares {f[2]}+{off:#x} with another patch')
             if any(k == index[f[1]] for k, _, _ in alts):
                 raise PatchError(f'{where}: {f[2]}+{off:#x} patched twice by set {f[1]}')
             if alts and alts[0][2] != orig:
                 raise PatchError(f'{where}: {f[2]}+{off:#x} expects {orig:08x}, an earlier line {alts[0][2]:08x}')
             alts.append((index[f[1]], repl, orig))
+        elif f[0] == 'seed' and len(f) == 3:
+            name, off = f[1], int(f[2], 16)
+            if name not in bases or off & 3 or not 0 <= off < bases[name][1]:
+                raise PatchError(f'{where}: seed must be an aligned offset in a layout module')
+            seeds.setdefault(name, set()).add(off)
         elif f[0] == 'spin' and len(f) >= 4:
             if f[1] not in bases:
                 raise PatchError(f'{where}: module {f[1]} not in the layout')
@@ -119,7 +162,11 @@ def load(path, mods):
     nxt = min((b for _, b, _ in mods if b > base), default=None)
     if nxt is not None and page + PAGE > nxt:
         raise PatchError(f'no room for the patch page after main ({page:#x})')
-    return Table(sets, sites, page, spins)
+    table = Table(sets, sites, page, spins, seeds)
+    for name, off, _ in table.hooks():
+        if off in spins.get(name, {}):
+            raise PatchError(f'{path}: hook shares spin wait back-edge {name}+{off:#x}')
+    return table
 
 
 def check(table, mod, name):

@@ -48,7 +48,7 @@ import patches  # noqa: E402
 import regs  # noqa: E402
 from check_content import GENERATED_MARKER  # noqa: E402
 from layout import layout, write as write_layout  # noqa: E402
-from lifter import hx  # noqa: E402
+from lifter import Insn, hx  # noqa: E402
 from module import Module  # noqa: E402
 
 TERMINATORS = ('b', 'br', 'ret', 'trap')
@@ -80,7 +80,7 @@ def _sext(v, n):
     return np.where(v & (1 << (n - 1)), v - (1 << n), v)
 
 
-def discover(mod):
+def discover(mod, extra_seeds=()):
     """Function starts of mod as a sorted int64 array of word indices into mod.words, plus discovery statistics."""
     w = mod.words
     n = len(w)
@@ -88,7 +88,10 @@ def discover(mod):
     def idx(mask):
         return np.flatnonzero(mask).astype(np.int64)
 
-    seeds = (np.asarray(mod.seeds(), dtype=np.int64) - mod.lo) >> 2
+    seed_addrs = mod.seeds()
+    if extra_seeds:
+        seed_addrs = sorted(set(seed_addrs).union(extra_seeds))
+    seeds = (np.asarray(seed_addrs, dtype=np.int64) - mod.lo) >> 2
 
     # B and BL: imm26. BL targets are function starts; B targets join the fixpoint below.
     b_all = idx((w & 0x7C000000) == 0x14000000)
@@ -219,6 +222,7 @@ class Emitter:
         self.reg_locals = reg_locals   # recomp/regs.py: registers per function in C locals
         self.kept = regs.CALLEE_SAVED if callee_saved else frozenset()   # not reloaded after a call
         self.uses_patches = False
+        self.uses_hooks = False
         self.stats = Counter()
         self.unsupported = Counter()
 
@@ -266,6 +270,11 @@ class Emitter:
         alternative may branch (bl, b, b.cond / cbz / tbz, ret)."""
         out = []
         for _, words in self.patched[a]:
+            if isinstance(words[0], patches.Hook):
+                hook = words[0]
+                # The wrapper returns before this instruction. Its effect on the site's flow is that of the original.
+                out.append([Insn('b', target=hook.target) if hook.replace else self.mod.lift(a)])
+                continue
             lifted = [self.mod.lifter.lift(w, a) for w in words]
             for j, r in enumerate(lifted):
                 last = j == len(lifted) - 1
@@ -273,6 +282,10 @@ class Emitter:
                     raise patches.PatchError(f'{a:#x}: replacement word {words[j]:08x} is a {r.kind}')
             out.append(lifted)
         return out
+
+    def hook_at(self, a):
+        word = self.patched[a][0][1][0]
+        return word if isinstance(word, patches.Hook) else None
 
     def flow(self, insns, entry, end, tables):
         """Successors of each instruction inside the function [entry, end). Index len(insns) stands for falling
@@ -317,7 +330,9 @@ class Emitter:
             elif k == 'br':
                 exits.add(i)   # through rt_dispatch, also a table's default
             if a in self.patched:
-                effects.append(self.patched_effect(ins, a))
+                reads, kind = self.patched_effect(ins, a)
+                hook = self.hook_at(a)
+                effects.append((reads or (hook is not None and not hook.replace), kind))
                 for words in self.replacements(a):
                     r = words[-1]
                     if r.kind == 'bl':
@@ -434,11 +449,27 @@ class Emitter:
             """if (switch) { replacement } else if ... else { original } for a patched site (recomp/patches.py)."""
             if ins.kind not in ('op', 'bl', 'b', 'bcond'):
                 raise patches.PatchError(f'{a:#x}: patched instruction is a {ins.kind}')
+            self.uses_patches = True
+            self.stats['patched_sites'] += 1
+            hook = self.hook_at(a)
+            if hook is not None:
+                self.uses_hooks = True
+                k = self.patched[a][0][0]
+                kind = 'replacement' if hook.replace else 'inline'
+                trace = (f'static uint8_t hook_seen; '
+                         f'rt_hook_first_hit(&hook_seen, {hx(a)}, {hx(hook.target)}, "{kind}"); ')
+                if hook.replace:
+                    return f'    if (rt_patch_on[{k}]) {{ {trace}{jump(hook.target, i)} }} {one(i, ins, a)}'
+                refs.add(hook.target)
+                # A guest inline wrapper observes the incoming flags and may modify any general register. Its own
+                # flags and dispatch PC are temporary. Unlike BL, this call does not assign a guest return address.
+                nz = f'c->nzcv = fnz_{fp.reader[i]}(&F); ' if fp else ''
+                return (f'    if (rt_patch_on[{k}]) {{ {trace}const uint64_t saved_nzcv = c->nzcv, saved_pc = c->pc; '
+                        f'{nz}{spill}{fname(hook.target)}(c); c->nzcv = saved_nzcv; c->pc = saved_pc;{reload} }} '
+                        f'{one(i, ins, a)}')
             line = '   '
             for (k, _), words in zip(self.patched[a], self.replacements(a)):
                 line += f' if (rt_patch_on[{k}]) {{ {" ".join(one(i, r, a) for r in words)} }} else'
-            self.uses_patches = True
-            self.stats['patched_sites'] += 1
             return f'{line} {{ {one(i, ins, a)} }}'
 
         body = []   # (instruction index or None for a label, line); a line belongs to the instruction it lifts
@@ -513,6 +544,7 @@ def chunk_text(name, number, emitter, fns):
     """C text of one chunk. fns: [(entry, end)]."""
     body, refs = [], set()
     emitter.uses_patches = False
+    emitter.uses_hooks = False
     for entry, end in fns:
         lines, r = emitter.function(entry, end)
         body.append('\n'.join(lines))
@@ -521,6 +553,15 @@ def chunk_text(name, number, emitter, fns):
     protos = ''.join(f'void {fname(r)}(Cpu *c);\n' for r in sorted(refs))
     if emitter.uses_patches:
         protos += 'extern uint8_t rt_patch_on[];\n'
+    if emitter.uses_hooks:
+        protos += '''extern uint8_t rt_hook_trace_enabled;
+void rt_hook_trace_log(uint64_t site, uint64_t target, const char *kind);
+static inline void rt_hook_first_hit(uint8_t *seen, uint64_t site, uint64_t target, const char *kind) {
+    if (__builtin_expect(rt_hook_trace_enabled, 0) &&
+        !__atomic_load_n(seen, __ATOMIC_RELAXED) && !__atomic_exchange_n(seen, 1, __ATOMIC_RELAXED))
+        rt_hook_trace_log(site, target, kind);
+}
+'''
     return (header(f'{name} chunk {number:04d}') + '#include "cpu.h"\n#include "simd.h"\n\n' + protos + '\n'
             + '\n\n'.join(body) + '\n')
 
@@ -718,6 +759,17 @@ def main():
     if unknown:
         raise SystemExit(f'not in {args.exefs}: {", ".join(sorted(unknown))}')
 
+    seeds = {name: {base + off for off in table.seeds.get(name, ())} for name, base, _ in mods}
+    hook_sources = {}
+    for name, off, hook in table.hooks():
+        if name not in want:
+            continue
+        dest = next(n for n, b, s in mods if b <= hook.target < b + s)
+        if dest not in want:
+            raise patches.PatchError(f'{name}+{off:#x}: hook targets module {dest} outside --modules')
+        seeds[dest].add(hook.target)
+        hook_sources.setdefault(name, []).append((off, hook.replace))
+
     paths, starts_abs, info, tasks = {}, {}, {}, []
     for name, base, _ in mods:
         if name not in want:
@@ -726,11 +778,23 @@ def main():
         path = args.exefs / name
         mod = Module(name, path, base, 'c')
         patches.check(table, mod, name)
-        starts, dstats = discover(mod)
+        extra = seeds[name]
+        for target in sorted(extra):
+            if not mod.in_text(target):
+                raise patches.PatchError(f'{name}: explicit function target {target:#x} is outside .text')
+        starts, dstats = discover(mod, extra)
         est = estimate_sizes(mod, starts)
         abs_starts = mod.lo + starts * 4
         n = len(starts) if not args.limit else min(args.limit, len(starts))
         ends = np.append(abs_starts[1:], mod.hi)
+        if extra and not extra.issubset(abs_starts[:n]):
+            raise patches.PatchError(f'{name}: --limit excludes an explicit function target')
+        for off, replace in hook_sources.get(name, ()):
+            a = base + off
+            if n == 0 or not abs_starts[0] <= a < ends[n - 1]:
+                raise patches.PatchError(f'{name}+{off:#x}: hook site is not in an emitted function')
+            if replace and (a in extra or a not in abs_starts[:n]):
+                raise patches.PatchError(f'{name}+{off:#x}: replacement hook requires a discovered function entry')
         chunks = partition(est[:n], args.chunk_fns, args.chunk_bytes, args.big_fn)
         moddir = args.out / name
         moddir.mkdir(parents=True, exist_ok=True)
