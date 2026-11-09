@@ -18,14 +18,15 @@ MAX_BYTES = 1024 * 1024
 # Switch containers, executables and game data formats.
 BLOCKED_SUFFIXES = {
     ".xci", ".xcz", ".nsp", ".nsz", ".nca", ".ncz", ".tik", ".cert",
-    ".nso", ".nro", ".nrr", ".npdm", ".keys",
+    ".nso", ".nro", ".nrr", ".npdm", ".keys", ".tkcl",
     ".bfres", ".bntx", ".bnsh", ".sarc", ".szs", ".zs", ".pack", ".byml",
     ".bgyml", ".msbt", ".bars", ".bwav", ".bfwav", ".bfstm", ".bfttf",
     ".bfotf", ".sharcb", ".webm",
 }
 
 # ExeFS modules carry no extension.
-BLOCKED_NAMES = {"main", "sdk", "rtld", "subsdk0", "subsdk1", "main.npdm"}
+BLOCKED_NAMES = {"main", "sdk", "rtld", "main.npdm"}
+SUBSDK_NAME = re.compile(r"subsdk[0-9]+", re.IGNORECASE)
 
 # Written by the code generator into every file it emits.
 GENERATED_MARKER = "TOTK_RECOMP_" + "GENERATED_FROM_GAME_CODE"
@@ -53,7 +54,7 @@ def problems_for(path: Path, allow_large: bool = False) -> list[str]:
     found = []
     if path.suffix.lower() in BLOCKED_SUFFIXES:
         found.append(f"blocked file type {path.suffix}")
-    if path.name.lower() in BLOCKED_NAMES:
+    if path.name.lower() in BLOCKED_NAMES or SUBSDK_NAME.fullmatch(path.name):
         found.append("name of a Switch executable module")
     if not path.is_file():
         return found
@@ -66,6 +67,8 @@ def problems_for(path: Path, allow_large: bool = False) -> list[str]:
         found.append(f"{size // 1024} KiB, over the {MAX_BYTES // 1024} KiB limit")
         return found
     data = path.read_bytes()
+    if data.startswith(b"NSO0"):
+        found.append("Switch NSO executable contents")
     if GENERATED_MARKER.encode() in data:
         found.append("generated from game code")
     if KEY_LINE.search(data.decode("utf-8", errors="ignore")):

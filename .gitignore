@@ -25,6 +25,7 @@ __pycache__/
 *.keys
 *.nso
 *.npdm
+*.tkcl
 *.zs
 *.pack
 *.sarc
