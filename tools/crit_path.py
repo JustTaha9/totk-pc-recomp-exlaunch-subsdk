@@ -6,10 +6,11 @@ the wake that ended the wait names the waker: the time from that signal to the e
 the walk goes on on the waker at the moment it signalled. A wait no guest thread ended (a timeout, a host signal)
 counts whole. The sums per frame add up to the frame interval.
 
-Usage: crit_path.py <crit.bin> [--top N]
+Usage: crit_path.py <crit.bin> [--top N] [--min-ms MILLISECONDS]
 """
 import argparse
 import bisect
+import math
 import struct
 from collections import Counter, defaultdict
 
@@ -44,7 +45,11 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('crit')
     ap.add_argument('--top', type=int, default=30)
+    ap.add_argument('--min-ms', type=float, default=0, help='include only intervals at least this long')
     a = ap.parse_args()
+    if not math.isfinite(a.min_ms) or a.min_ms < 0:
+        ap.error('--min-ms must be finite and nonnegative')
+    min_ns = a.min_ms * 1e6
     threads, ev = load(a.crit)
     seg = defaultdict(lambda: ([], [], []))   # per thread: starts, states, wakers at the start
     wakes = defaultdict(lambda: ([], []))     # per thread: signal times, wakers
@@ -65,6 +70,8 @@ def main():
     tot = Counter()
     lens = []
     for (t0, p0, _), (t1, p1, _) in zip(frames, frames[1:]):
+        if t1 - t0 < min_ns:
+            continue
         x, t, steps = p1, t1, 0
         acc = Counter()
         while t > t0 and steps < 100000:
@@ -101,6 +108,8 @@ def main():
         lens.append(t1 - t0)
     n = len(lens)
     if not n:
+        if len(frames) >= 2:
+            raise SystemExit('no frame interval meets --min-ms')
         raise SystemExit('fewer than two presents recorded')
     frame_ms = sum(lens) / n / 1e6
     print(f'{n} frames, mean interval {frame_ms:.2f} ms; critical path per frame (ms, share):')
